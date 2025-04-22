@@ -75,7 +75,7 @@ if __name__ == '__main__':
 
 # Load data from Yahoo Finance
 # Download data using yfinance
-df = yf.download('MSTR', start='2000-10-01', interval='1h')
+df = yf.download('MSTR', start='2023-10-01', interval='1h',)
 
 # Preprocess the DataFrame to match Backtrader's expected format
 df = df[['Open', 'High', 'Low', 'Close', 'Volume']]  # Select required columns
