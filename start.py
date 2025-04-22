@@ -1,118 +1,107 @@
-from ib_insync import IB, Stock, Future, Contract
+from __future__ import (absolute_import, division, print_function,
+                        unicode_literals)
+
+import datetime
+import backtrader as bt
 import pandas as pd
+import yfinance as yf
+import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-import threading
-import time
 
-# --------------------------
-# 1. Data Collection Class
-# --------------------------
-class ShortFeeDataCollector(EWrapper):
+
+
+class EMACrossoverStrategy(bt.Strategy):
+    params = (
+        ('short_ema', 10),  # Short-term EMA period
+        ('long_ema', 30),   # Long-term EMA period
+    )
+
     def __init__(self):
-        EWrapper.__init__(self)
-        self.data = []
-        
-    def tickString(self, reqId, tickType, value):
-        if tickType == 47:  # Shortable Share Fee
-            self.data.append({
-                'timestamp': pd.Timestamp.now(),
-                'fee': float(value)
-            })
+        # Define the short-term and long-term EMAs
+        self.ema_short = bt.indicators.EMA(self.data.close, period=self.params.short_ema)
+        self.ema_long = bt.indicators.EMA(self.data.close, period=self.params.long_ema)
 
-# --------------------------
-# 2. Main Collection Function
-# --------------------------
-def collect_short_fee_data(symbol="AAPL", duration_sec=60):
-    # Create IBKR connection
-    client = EClient(ShortFeeDataCollector())
-    client.connect("127.0.0.1", 7497, clientId=1)
-    
-    # Define contract
-    contract = Contract()
-    contract.symbol = symbol
-    contract.secType = "STK"
-    contract.exchange = "SMART"
-    contract.currency = "USD"
-    
-    # Start connection thread
-    thread = threading.Thread(target=client.run, daemon=True)
-    thread.start()
-    time.sleep(1)  # Wait for connection
-    
-    # Request market data
-    client.reqMktData(1, contract, "", False, False, [])
-    
-    # Collect data
-    print(f"Collecting {symbol} short fee data for {duration_sec} seconds...")
-    time.sleep(duration_sec)
-    
-    # Disconnect and format data
-    client.disconnect()
-    df = pd.DataFrame(client.data)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    return df
+        # To keep track of pending orders
+        self.order = None
 
-# --------------------------
-# 3. Advanced Visualization
-# --------------------------
-def visualize_short_fees(df, symbol):
-    plt.figure(figsize=(14, 7))
-    
-    # Create main plot
-    ax = plt.subplot(111)
-    ax.plot(df['timestamp'], df['fee'], 
-            marker='o', 
-            linestyle='-', 
-            color='#2c7bb6',
-            markersize=8,
-            linewidth=2)
-    
-    # Formatting
-    ax.set_title(f"Real-time Short Borrow Fee: {symbol}", fontsize=16, pad=20)
-    ax.set_ylabel("Fee Rate (%)", fontsize=12)
-    ax.grid(True, alpha=0.3)
-    
-    # Date formatting
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-    plt.xticks(rotation=45, ha='right')
-    
-    # Annotate max/min values
-    max_fee = df['fee'].max()
-    min_fee = df['fee'].min()
-    ax.annotate(f'Max: {max_fee:.2f}%', 
-                xy=(df['timestamp'][df['fee'].idxmax()], max_fee),
-                xytext=(10, 10), 
-                textcoords='offset points',
-                arrowprops=dict(arrowstyle="->"))
-    
-    ax.annotate(f'Min: {min_fee:.2f}%', 
-                xy=(df['timestamp'][df['fee'].idxmin()], min_fee),
-                xytext=(10, -30), 
-                textcoords='offset points',
-                arrowprops=dict(arrowstyle="->"))
+    def log(self, txt, dt=None):
+        ''' Logging function for this strategy '''
+        dt = dt or self.datas[0].datetime.date(0)
+        print('%s, %s' % (dt.isoformat(), txt))
 
-    # Add statistics box
-    stats_text = f"""Average: {df['fee'].mean():.2f}%
-Std Dev: {df['fee'].std():.2f}%
-Samples: {len(df)}"""
-    ax.text(0.02, 0.98, stats_text,
-            transform=ax.transAxes,
-            verticalalignment='top',
-            bbox=dict(boxstyle='round', alpha=0.5))
+    def notify_order(self, order):
+        if order.status in [order.Submitted, order.Accepted]:
+            return  # Order submitted/accepted, no action needed
 
-    plt.tight_layout()
-    plt.show()
+        if order.status in [order.Completed]:
+            if order.isbuy():
+                self.log(f'BUY EXECUTED, Price: {order.executed.price:.2f}')
+            elif order.issell():
+                self.log(f'SELL EXECUTED, Price: {order.executed.price:.2f}')
+            self.bar_executed = len(self)
 
-# --------------------------
-# 4. Execute the Program
-# --------------------------
-if __name__ == "__main__":
-    # Collect data (60 seconds)
-    fee_data = collect_short_fee_data(symbol="TSLA", duration_sec=60)
-    
-    # Save raw data
-    fee_data.to_csv("short_fees.csv", index=False)
-    
-    # Visualize
-    visualize_short_fees(fee_data, "TSLA")
+        elif order.status in [order.Canceled, order.Margin, order.Rejected]:
+            self.log('Order Canceled/Margin/Rejected')
+
+        self.order = None  # Reset the order
+
+    def next(self):
+        # Log the closing price
+        self.log(f'Close, {self.data.close[0]:.2f}')
+
+        # Check if an order is pending
+        if self.order:
+            return
+
+        # Check if we are in the market
+        if not self.position:
+            # Buy if short EMA crosses above long EMA
+            if self.ema_short[0] > self.ema_long[0] and self.ema_short[-1] <= self.ema_long[-1]:
+                self.log(f'BUY CREATE, {self.data.close[0]:.2f}')
+                self.order = self.buy()
+        else:
+            # Sell if short EMA crosses below long EMA
+            if self.ema_short[0] < self.ema_long[0] and self.ema_short[-1] >= self.ema_long[-1]:
+                self.log(f'SELL CREATE, {self.data.close[0]:.2f}')
+                self.order = self.sell()
+
+
+if __name__ == '__main__':
+    # Create a cerebro instance
+    cerebro = bt.Cerebro()
+
+    # Add the strategy
+    cerebro.addstrategy(EMACrossoverStrategy)
+
+# Load data from Yahoo Finance
+# Download data using yfinance
+df = yf.download('AAPL', start='2023-10-01', end='2023-12-31', interval='1h')
+
+# Preprocess the DataFrame to match Backtrader's expected format
+df = df[['Open', 'High', 'Low', 'Close', 'Volume']]  # Select required columns
+df.columns = ['open', 'high', 'low', 'close', 'volume']  # Rename columns to lowercase
+df.index.name = 'datetime'  # Set index name to 'datetime'
+
+# Convert to Backtrader feed
+data = bt.feeds.PandasData(dataname=df)
+
+# Add the data to Cerebro
+cerebro.adddata(data)
+
+# Set the starting cash
+cerebro.broker.setcash(100000.0)
+
+# Set the commission (0.1%)
+cerebro.broker.setcommission(commission=0.001)
+
+# Print the starting portfolio value
+print('Starting Portfolio Value: %.2f' % cerebro.broker.getvalue())
+
+# Run the strategy
+cerebro.run()
+
+# Print the final portfolio value
+print('Final Portfolio Value: %.2f' % cerebro.broker.getvalue())
+
+# Plot the results
+cerebro.plot(style='candlestick')
