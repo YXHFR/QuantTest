@@ -114,10 +114,10 @@ Samples: {len(df)}"""
 # --------------------------
 if __name__ == "__main__":
     # Collect data (60 seconds)
-    fee_data = collect_short_fee_data(symbol="TSLA", duration_sec=60)
+    fee_data = collect_short_fee_data(symbol="AAPL", duration_sec=60)
     
     # Save raw data
     fee_data.to_csv("short_fees.csv", index=False)
     
     # Visualize
-    visualize_short_fees(fee_data, "TSLA")
+    visualize_short_fees(fee_data, "AAPL")
