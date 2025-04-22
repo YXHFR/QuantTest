@@ -12,36 +12,44 @@ class DelayedDataFetcher(EWrapper, EClient):
         self.data = []
         self.price_data = {}
         self.fee_data = {}
-        
+        self.reqId_to_symbol = {}
+
     def tickPrice(self, reqId, tickType, price, attrib):
         if tickType == 4:  # Last price (delayed)
             symbol = self.reqId_to_symbol[reqId]
             self.price_data[symbol] = price
-            
+
     def tickString(self, reqId, tickType, value):
         if tickType == 47:  # Short borrow fee (delayed)
             symbol = self.reqId_to_symbol[reqId]
             self.fee_data[symbol] = float(value)
-    
+
+    def marketDataType(self, reqId, marketDataType):
+        """Callback to confirm the market data type."""
+        print(f"MarketDataType. ReqId: {reqId}, Type: {marketDataType}")
+
     def get_delayed_data(self, symbols):
         self.reqId_to_symbol = {}
         self.connect("127.0.0.1", 7497, clientId=1)
         thread = threading.Thread(target=self.run, daemon=True)
         thread.start()
         time.sleep(2)  # Longer connection wait
-        
+
+        # Request delayed market data
+        self.reqMarketDataType(3)  # 3 = Delayed data
+
         results = []
         for reqId, symbol in enumerate(symbols, 1):
             contract = self._create_contract(symbol)
             self.reqId_to_symbol[reqId] = symbol
-            
-            # KEY DIFFERENCE: Using "233" for delayed data
-            self.reqMktData(reqId, contract, "233", False, False, [])
+
+            # Request market data
+            self.reqMktData(reqId, contract, "", False, False, [])
             time.sleep(1)  # Required delay between requests
-            
+
         # Wait for data to arrive
         time.sleep(5)
-        
+
         # Compile results
         for symbol in symbols:
             results.append({
@@ -50,7 +58,7 @@ class DelayedDataFetcher(EWrapper, EClient):
                 "Short Fee (%)": self.fee_data.get(symbol, "N/A"),
                 "Data Type": "Delayed (15 min)"
             })
-        
+
         self.disconnect()
         return pd.DataFrame(results)
     
