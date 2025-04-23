@@ -1,106 +1,108 @@
+"""
+IBKR Delayed Market Data Fetcher using ib_insync
+This approach is often more reliable than using ibapi directly
+
+Prerequisites:
+- TWS Running on port 7497 (paper trading)
+- ib_insync installed (pip install ib_insync)
 - Market data permissions enabled in TWS
 """
 
-from ibapi.client import EClient
-from ibapi.wrapper import EWrapper
-from ibapi.contract import Contract
+from ib_insync import *
 import pandas as pd
 import matplotlib.pyplot as plt
-import threading
 import time
 import numpy as np
 
-class DelayedDataFetcher(EWrapper, EClient):
-    def __init__(self):
-        EClient.__init__(self, self)
-        self.data_ready = threading.Event()
-        self.price_data = {}
-        self.fee_data = {}
-        self.reqId_to_symbol = {}
-        self.error_messages = []
-
-    def error(self, reqId, errorCode, errorString):
-        if errorCode in [2104, 2106, 2158]:  # Connection messages
-            return
-        self.error_messages.append(f"Error {errorCode}: {errorString}")
-
-    def tickPrice(self, reqId, tickType, price, attrib):
-        if tickType == 4:  # Last price (delayed)
-            symbol = self.reqId_to_symbol[reqId]
-            self.price_data[symbol] = price
-
-    def tickString(self, reqId, tickType, value):
-        if tickType == 47:  # Short borrow fee (delayed)
-            symbol = self.reqId_to_symbol[reqId]
+def fetch_delayed_data(symbols):
+    """Fetch delayed market data using ib_insync"""
+    print("Starting connection attempt...")
+    
+    try:
+        # Create IB instance
+        ib = IB()
+        
+        # Try multiple client IDs
+        for client_id in [10, 20, 30, 40, 50]:
             try:
-                self.fee_data[symbol] = float(value)
-            except:
-                self.fee_data[symbol] = np.nan
-
-    def get_delayed_data(self, symbols):
-        self.__init__()  # Reset state
-        self.connect("127.0.0.1", 7497, clientId=1)
+                print(f"Trying to connect with client ID {client_id}...")
+                ib.connect('127.0.0.1', 7497, clientId=client_id, readonly=True, timeout=5)
+                if ib.isConnected():
+                    print(f"✅ Connected successfully with client ID {client_id}")
+                    break
+            except Exception as e:
+                print(f"Failed with client ID {client_id}: {str(e)}")
+                continue
         
-        # Start connection thread
-        thread = threading.Thread(target=self.run, daemon=True)
-        thread.start()
-        
-        # Wait for connection
-        time.sleep(2)
-        
-        # Request market data with delayed snapshot
-        for reqId, symbol in enumerate(symbols, 1):
-            contract = self.create_contract(symbol)
-            self.reqId_to_symbol[reqId] = symbol
-            self.reqMktData(reqId, contract, "233", False, False, [])
-            time.sleep(1)  # Rate limit
-        
-        # Wait for data collection
-        time.sleep(10)
-        self.disconnect()
-        
-        # Process results
+        if not ib.isConnected():
+            print("❌ Could not connect with any client ID")
+            return pd.DataFrame()
+            
+        # Get market data for symbols
         results = []
         for symbol in symbols:
-            price = self.price_data.get(symbol, np.nan)
-            fee = self.fee_data.get(symbol, np.nan)
+            print(f"Requesting data for {symbol}...")
             
-            # Convert to numeric types
-            try:
-                price = float(price)
-            except:
-                price = np.nan
+            # Create contract
+            if symbol in ["SPY", "GLD", "IAU"]:
+                contract = Stock(symbol, 'ARCA', 'USD')
+            else:
+                contract = Stock(symbol, 'SMART', 'USD')
                 
-            results.append({
-                "Symbol": symbol,
-                "Price": price,
-                "Short Fee (%)": fee
-            })
-        
-        df = pd.DataFrame(results)
-        df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        return df.dropna()
-
-    def create_contract(self, symbol):
-        contract = Contract()
-        contract.symbol = symbol
-        contract.secType = "STK"
-        contract.currency = "USD"
-        
-        # Special handling for common ETFs
-        if symbol == "SPY":
-            contract.exchange = "ARCA"
-            contract.primaryExchange = "ARCA"
-        elif symbol in ["GLD", "IAU"]:
-            contract.exchange = "ARCA"
-            contract.primaryExchange = "ARCA"
-        else:
-            contract.exchange = "SMART"
+            # Request market data (with 2-second timeout)
+            try:
+                # Non-snapshot delayed data
+                ib.reqMarketDataType(3)  # 3 = Delayed
+                ib.qualifyContracts(contract)
+                
+                ticker = ib.reqMktData(contract)
+                
+                # Wait for data to arrive
+                timeout = time.time() + 5
+                while not ticker.last and time.time() < timeout:
+                    ib.sleep(0.1)
+                
+                price = ticker.last if ticker.last else np.nan
+                
+                # Try to get short fee (not always available)
+                short_fee = np.nan
+                try:
+                    ib.sleep(0.5)  # give time for other data to arrive
+                    if hasattr(ticker, 'shortableShares'):
+                        short_fee = ticker.shortableShares
+                except:
+                    pass
+                
+                results.append({
+                    "Symbol": symbol,
+                    "Price": price,
+                    "Short Fee (%)": short_fee
+                })
+                print(f"Received price for {symbol}: {price}")
+            except Exception as e:
+                print(f"Error fetching data for {symbol}: {str(e)}")
+                results.append({
+                    "Symbol": symbol,
+                    "Price": np.nan,
+                    "Short Fee (%)": np.nan
+                })
             
-        return contract
+            # Small delay between requests
+            ib.sleep(1)
+    
+    except Exception as e:
+        print(f"Error during connection: {str(e)}")
+        return pd.DataFrame()
+    finally:
+        # Disconnect when done
+        if 'ib' in locals() and ib.isConnected():
+            print("Disconnecting...")
+            ib.disconnect()
+    
+    return pd.DataFrame(results)
 
 def plot_data(df):
-    if df.empty:
+    if df.empty or df['Price'].isna().all():
         print("No data received - check market hours (9:30 AM - 4:00 PM ET)")
         return
     
@@ -122,19 +124,17 @@ def plot_data(df):
 
 if __name__ == "__main__":
     # Example usage
-    fetcher = DelayedDataFetcher()
+    print("Attempting to fetch delayed data from IBKR using ib_insync...")
+    symbols = ["SPY", "GLD", "IAU"]
     
-    # Try IBKR connection first
-    print("Attempting to fetch delayed data from IBKR...")
-    live_df = fetcher.get_delayed_data(["SPY", "GLD", "IAU"])
+    live_df = fetch_delayed_data(symbols)
     
-    if not live_df.empty:
+    if not live_df.empty and not live_df['Price'].isna().all():
         print("Successfully fetched delayed data:")
         print(live_df)
         plot_data(live_df)
     else:
         # Fallback to sample data
-        print("\n".join(fetcher.error_messages))
         print("\nUsing sample data instead...")
         sample_data = {
             "Symbol": ["SPY", "GLD", "IAU"],
@@ -143,3 +143,10 @@ if __name__ == "__main__":
         }
         sample_df = pd.DataFrame(sample_data)
         plot_data(sample_df)
+        
+        print("\n=== Additional Troubleshooting Steps ===")
+        print("1. Is your IBKR account funded? Some demo accounts require funding")
+        print("2. Do you have market data subscriptions for these symbols?")
+        print("3. Is it currently market hours? (9:30 AM - 4:00 PM ET, Mon-Fri)")
+        print("4. Try completely restarting your computer and TWS")
+        print("5. Check if your TWS version matches your API version")
