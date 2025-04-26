@@ -1,7 +1,4 @@
 # Market data permissions enabled in TWS
-
-
-from unittest import result
 from ibapi.client import EClient
 from ibapi.wrapper import EWrapper
 from ibapi.contract import Contract
@@ -12,6 +9,24 @@ import time
 import numpy as np
 
 class DelayedDataFetcher(EWrapper, EClient):
+    def create_contract(self, symbol):
+        contract = Contract()
+        contract.symbol = symbol
+        contract.secType = "STK"
+        contract.currency = "USD"
+        
+        # Special handling for common ETFs
+        if symbol == "SPY":
+            contract.exchange = "ARCA"
+            contract.primaryExchange = "ARCA"
+        elif symbol in ["GLD", "IAU"]:
+            contract.exchange = "ARCA"
+            contract.primaryExchange = "ARCA"
+        else:
+            contract.exchange = "SMART"
+            
+        return contract
+    
     def __init__(self):
         EClient.__init__(self, self)
         self.data_ready = threading.Event()
@@ -20,14 +35,20 @@ class DelayedDataFetcher(EWrapper, EClient):
         self.reqId_to_symbol = {}
 
     def tickPrice(self, reqId, tickType, price, attrib):
-        if tickType == 4:  # Last price (delayed)
-            symbol = self.reqId_to_symbol[reqId]
-            self.price_data[symbol] = price
+        print(f"tickPrice. ReqId: {reqId}, TickType: {tickType}, Price: {price}")
+        if tickType == 68:  # Delayed last price
+            symbol = self.reqId_to_symbol.get(reqId, None)
+            if symbol:
+                self.price_data[symbol] = price
+                print(f"Stored price for {symbol}: {price}")
 
     def tickString(self, reqId, tickType, value):
+        print(f"tickString. ReqId: {reqId}, TickType: {tickType}, Value: {value}")
         if tickType == 47:  # Short borrow fee (delayed)
-            symbol = self.reqId_to_symbol[reqId]
-            self.fee_data[symbol] = float(value)
+            symbol = self.reqId_to_symbol.get(reqId, None)
+            if symbol:
+                self.fee_data[symbol] = float(value)
+                print(f"Stored fee for {symbol}: {value}")
 
     def marketDataType(self, reqId, marketDataType):
         """Callback to confirm the market data type."""
@@ -55,7 +76,7 @@ class DelayedDataFetcher(EWrapper, EClient):
             time.sleep(1)  # Required delay between requests
 
         # Wait for data to arrive
-        time.sleep(5)
+        time.sleep(50)
 
         # Compile results
         for symbol in symbols:
@@ -79,23 +100,7 @@ class DelayedDataFetcher(EWrapper, EClient):
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         return df.dropna()
 
-    def create_contract(self, symbol):
-        contract = Contract()
-        contract.symbol = symbol
-        contract.secType = "STK"
-        contract.currency = "USD"
-        
-        # Special handling for common ETFs
-        if symbol == "SPY":
-            contract.exchange = "ARCA"
-            contract.primaryExchange = "ARCA"
-        elif symbol in ["GLD", "IAU"]:
-            contract.exchange = "ARCA"
-            contract.primaryExchange = "ARCA"
-        else:
-            contract.exchange = "SMART"
-            
-        return contract
+    
 
 def plot_data(df):
     if df.empty:
@@ -126,17 +131,5 @@ if __name__ == "__main__":
     print("Attempting to fetch delayed data from IBKR...")
     live_df = fetcher.get_delayed_data(["SPY", "GLD", "IAU"])
     
-    if not live_df.empty:
-        print("Successfully fetched delayed data:")
-        print(live_df)
-        plot_data(live_df)
-    else:
-        # Fallback to sample data
-        print("\nUsing sample data instead...")
-        sample_data = {
-            "Symbol": ["SPY", "GLD", "IAU"],
-            "Price": [445.21, 180.55, 35.12],
-            "Short Fee (%)": [0.3, 0.45, 0.5]
-        }
-        sample_df = pd.DataFrame(sample_data)
-        plot_data(sample_df)
+    print(live_df)
+    plot_data(live_df)
